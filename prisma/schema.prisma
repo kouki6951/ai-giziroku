@@ -1,0 +1,67 @@
+// Prisma schema for Giziroku
+// See ../.docs/plan/04_db_schema.md
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Meeting {
+  id          String    @id @default(cuid())
+  title       String
+  description   String?   @map("description") // 会議の目的・内容などのメタ情報
+  roles         String?   @map("roles") // フィードバックを求めるロール (JSON配列の文字列)
+  summaryStatus String?   @map("summary_status") // 議事録生成の状態: processing | done | error
+  startedAt   DateTime  @default(now()) @map("started_at")
+  endedAt     DateTime? @map("ended_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  transcripts Transcript[]
+  feedbacks   ClaudeFeedback[]
+  summaries   MeetingSummary[]
+
+  @@index([createdAt])
+  @@map("meetings")
+}
+
+model Transcript {
+  id          String   @id @default(cuid())
+  meetingId   String   @map("meeting_id")
+  speakerType String   @map("speaker_type") // 'self' | 'partner'
+  text        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+  @@map("transcripts")
+}
+
+model ClaudeFeedback {
+  id           String   @id @default(cuid())
+  meetingId    String   @map("meeting_id")
+  feedbackText String   @map("feedback_text")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+  @@map("claude_feedbacks")
+}
+
+model MeetingSummary {
+  id          String   @id @default(cuid())
+  meetingId   String   @map("meeting_id")
+  summaryText String   @map("summary_text")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+  @@map("meeting_summaries")
+}

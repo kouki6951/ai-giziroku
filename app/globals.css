@@ -1,26 +1,131 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* 添付のコーポレートサイトを参考にしたブランドカラー */
+  --background: #d8eef5; /* 水色（ページ背景） */
+  --header: #d8eef5; /* ページ背景と同色（ヘッダー帯） */
+  --brand-ink: #15223c; /* 濃紺（主要CTA） */
+  --brand-blue: #4cb6dd; /* アクセント青 */
+  --brand-blue-soft: #93cfe8; /* 大きな英字見出し */
+  --brand-green: #9ec540; /* ライムのタグ */
+  --foreground: #1f2937;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: var(--font-inter), var(--font-noto-jp), system-ui, sans-serif;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-inter), var(--font-noto-jp), system-ui, sans-serif;
+}
+
+/* Tailwind v4 ではボタンのデフォルト cursor:pointer が無いため補う */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled),
+  label:has(> input[type="checkbox"]:not(:disabled)),
+  summary {
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  /* 大きな英字見出し（Service / Solution などの雰囲気） */
+  .eyebrow {
+    font-size: 2rem;
+    line-height: 1.1;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--brand-blue-soft);
+  }
+  @media (min-width: 640px) {
+    .eyebrow {
+      font-size: 2.5rem;
+    }
+  }
+  .eyebrow-sub {
+    margin-top: 0.25rem;
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: #2b8fb8;
+  }
+
+  /* ピル型ボタン */
+  .btn-ink,
+  .btn-sky,
+  .btn-green,
+  .btn-outline,
+  .btn-soft {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 9999px;
+    padding: 0.625rem 1.25rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .btn-ink {
+    background: var(--brand-ink);
+    color: #fff;
+  }
+  .btn-ink:hover:not(:disabled) {
+    opacity: 0.88;
+  }
+  .btn-sky {
+    background: var(--brand-blue);
+    color: #fff;
+  }
+  .btn-sky:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+  .btn-green {
+    background: var(--brand-green);
+    color: #fff;
+  }
+  .btn-green:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+  .btn-soft {
+    background: #fff;
+    color: #334155;
+    border: 1px solid #d4dde6;
+  }
+  .btn-soft:hover:not(:disabled) {
+    background: #f1f7fb;
+  }
+  .btn-outline {
+    background: #ffffff;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+  }
+  .btn-outline:hover:not(:disabled) {
+    background: #f1f7fb;
+  }
+  .btn-ink:disabled,
+  .btn-sky:disabled,
+  .btn-green:disabled,
+  .btn-soft:disabled,
+  .btn-outline:disabled {
+    opacity: 0.5;
+  }
+
+  /* ライムのタグ */
+  .tag-lime {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 9999px;
+    background: var(--brand-green);
+    color: #fff;
+    padding: 0.125rem 0.625rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
 }

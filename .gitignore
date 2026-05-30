@@ -36,6 +36,15 @@ yarn-error.log*
 # vercel
 .vercel
 
+# claude code
+.claude/
+
+# local sqlite db (schema は prisma db push で再生成)
+/prisma/*.db
+/prisma/*.db-journal
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/node_modules/.prisma/client

@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { buildFeedbackSystemPrompt, buildSummarySystemPrompt } from "./roles";
+import { type SpeakerLabels, speakerName } from "./speakers";
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6";
@@ -16,26 +17,28 @@ function client() {
 }
 
 export type TranscriptForPrompt = {
-  speakerType: "self" | "partner" | string;
+  speakerType: string;
   text: string;
   createdAt: Date | string;
 };
 
-function transcriptsToText(transcripts: TranscriptForPrompt[]): string {
+function transcriptsToText(transcripts: TranscriptForPrompt[], labels: SpeakerLabels): string {
   return transcripts
-    .map((t) => {
-      const speaker = t.speakerType === "self" ? "自分" : t.speakerType === "partner" ? "相手" : t.speakerType;
-      return `${speaker}: ${t.text}`;
-    })
+    .map((t) => `${speakerName(t.speakerType, labels)}: ${t.text}`)
     .join("\n");
 }
 
 export async function requestFeedback(
   transcripts: TranscriptForPrompt[],
-  opts?: { recentLimit?: number; roleIds?: string[]; description?: string | null },
+  opts?: {
+    recentLimit?: number;
+    roleIds?: string[];
+    description?: string | null;
+    speakerLabels?: SpeakerLabels;
+  },
 ): Promise<string> {
   const recent = opts?.recentLimit ? transcripts.slice(-opts.recentLimit) : transcripts;
-  const conversation = transcriptsToText(recent);
+  const conversation = transcriptsToText(recent, opts?.speakerLabels ?? {});
 
   const res = await client().messages.create({
     model: MODEL,
@@ -61,9 +64,9 @@ export async function requestFeedback(
 export async function requestSummary(
   transcripts: TranscriptForPrompt[],
   feedbacks: { feedbackText: string; createdAt: Date | string }[],
-  opts?: { roleIds?: string[]; description?: string | null },
+  opts?: { roleIds?: string[]; description?: string | null; speakerLabels?: SpeakerLabels },
 ): Promise<string> {
-  const conversation = transcriptsToText(transcripts);
+  const conversation = transcriptsToText(transcripts, opts?.speakerLabels ?? {});
   const feedbackBlock = feedbacks.length
     ? `\n\n## 議中に取得した提案メモ\n${feedbacks
         .map((f, i) => `### 取得${i + 1}\n${f.feedbackText}`)

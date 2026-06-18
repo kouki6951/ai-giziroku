@@ -3,11 +3,12 @@ import { notFound } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { prisma } from "@/lib/prisma";
-import { formatDateTime, formatTime } from "@/lib/utils";
+import { formatDateTime } from "@/lib/utils";
 import { CopySummaryButton } from "./copy-summary-button";
 import { DeleteMeetingButton } from "./delete-meeting-button";
 import { SummaryStatusPoller } from "./summary-status-poller";
 import { RoleFeedbackTabs } from "./role-feedback-tabs";
+import { TranscriptList } from "./transcript-list";
 
 export const dynamic = "force-dynamic";
 
@@ -92,33 +93,16 @@ export default async function MeetingDetailPage({
       </section>
 
       <section className="rounded-2xl border border-black/5 bg-white p-5">
-        <details>
-          <summary className="cursor-pointer text-lg font-semibold">
-            発言ログ（{meeting.transcripts.length} 件）
-          </summary>
-          <ul className="mt-4 space-y-2">
-            {meeting.transcripts.map((t) => (
-              <li key={t.id} className="rounded border border-zinc-100 bg-zinc-50 px-3 py-2 text-sm">
-                <div className="flex items-baseline gap-2">
-                  <span className="text-xs text-zinc-500">{formatTime(t.createdAt)}</span>
-                  <span
-                    className={
-                      t.speakerType === "self"
-                        ? "rounded bg-sky-100 px-1.5 text-xs text-sky-700"
-                        : "rounded bg-emerald-100 px-1.5 text-xs text-emerald-700"
-                    }
-                  >
-                    {t.speakerType === "self" ? "自分" : "相手"}
-                  </span>
-                </div>
-                <p className="mt-1 whitespace-pre-wrap">{t.text}</p>
-              </li>
-            ))}
-            {meeting.transcripts.length === 0 ? (
-              <li className="text-sm text-zinc-500">発言ログはありません。</li>
-            ) : null}
-          </ul>
-        </details>
+        <TranscriptList
+          meetingId={meeting.id}
+          initialSpeakerLabels={meeting.speakerLabels}
+          initialTranscripts={meeting.transcripts.map((t) => ({
+            id: t.id,
+            speakerType: t.speakerType,
+            text: t.text,
+            createdAt: t.createdAt.toISOString(),
+          }))}
+        />
       </section>
 
       <section className="rounded-2xl border border-black/5 bg-white p-5">

@@ -4,17 +4,31 @@ import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { RoleFeedbackTabs } from "../role-feedback-tabs";
+import { SpeakerBadge, SpeakerManager, SpeakerReassignSelect } from "../speakers-ui";
+import {
+  type SpeakerLabels,
+  SELF_KEY,
+  collectSpeakerKeys,
+  parseSpeakerLabels,
+} from "@/lib/speakers";
 import {
   type RecognizerHandle,
   type RecognizerStatus,
-  type Speaker,
-  startLoopback,
+  type Source,
+  acquirePartnerStream,
   startMic,
+  startRecognizer,
 } from "@/lib/amivoice/client";
+
+// 話者分離の感度スライダーの範囲（diarizerAlpha = 10^exp）。
+const DIARIZER_EXP_MIN = -40;
+const DIARIZER_EXP_MAX = 20;
+const DIARIZER_EXP_DEFAULT = 0;
+const DIARIZER_EXP_STORAGE_KEY = "giziroku.diarizerExp";
 
 type TranscriptEntry = {
   id: string;
-  speaker: Speaker;
+  speaker: string;
   text: string;
   at: Date;
 };
@@ -25,7 +39,7 @@ type FeedbackEntry = {
   createdAt: string;
 };
 
-type SpeakerState = {
+type SourceState = {
   status: RecognizerStatus | "idle";
   partial: string;
 };
@@ -76,9 +90,15 @@ export default function RecordingPage({
   const [now, setNow] = useState<Date>(new Date());
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
   const [feedbacks, setFeedbacks] = useState<FeedbackEntry[]>([]);
+  const [speakerLabels, setSpeakerLabels] = useState<SpeakerLabels>({});
 
-  const [selfState, setSelfState] = useState<SpeakerState>({ status: "idle", partial: "" });
-  const [partnerState, setPartnerState] = useState<SpeakerState>({ status: "idle", partial: "" });
+  const [selfState, setSelfState] = useState<SourceState>({ status: "idle", partial: "" });
+  const [partnerState, setPartnerState] = useState<SourceState>({ status: "idle", partial: "" });
+
+  // 話者分離の感度: diarizerAlpha = 10^diarizerExp。大きいほど話者が分かれやすい。
+  const [diarizerExp, setDiarizerExp] = useState<number>(DIARIZER_EXP_DEFAULT);
+  // 現在 取り込み中のセッションが実際に使っている exp（変更後の「再適用」要否の判定に使う）。
+  const [runningExp, setRunningExp] = useState<number | null>(null);
 
   const [toast, setToast] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -86,7 +106,26 @@ export default function RecordingPage({
 
   const selfHandleRef = useRef<RecognizerHandle | null>(null);
   const partnerHandleRef = useRef<RecognizerHandle | null>(null);
+  // 相手音声のストリーム。感度変更時に画面共有を再要求せず認識だけ貼り直すため保持する。
+  const partnerStreamRef = useRef<MediaStream | null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
+
+  // 感度設定の読み込み / 永続化（localStorage）。
+  // 初期描画は SSR/クライアントとも既定値で揃え（ハイドレーション不整合の回避）、
+  // マウント後に保存値へ一度だけ同期する。
+  useEffect(() => {
+    const saved = window.localStorage.getItem(DIARIZER_EXP_STORAGE_KEY);
+    if (saved !== null) {
+      const n = Number(saved);
+      if (Number.isFinite(n)) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- 外部ストア(localStorage)からの一度きりの同期
+        setDiarizerExp(Math.min(DIARIZER_EXP_MAX, Math.max(DIARIZER_EXP_MIN, Math.round(n))));
+      }
+    }
+  }, []);
+  useEffect(() => {
+    window.localStorage.setItem(DIARIZER_EXP_STORAGE_KEY, String(diarizerExp));
+  }, [diarizerExp]);
 
   // 経過時間
   useEffect(() => {
@@ -107,16 +146,18 @@ export default function RecordingPage({
         title: string;
         startedAt: string;
         endedAt: string | null;
+        speakerLabels: string | null;
         transcripts: { id: string; speakerType: string; text: string; createdAt: string }[];
         feedbacks: { id: string; feedbackText: string; createdAt: string }[];
       };
       if (cancelled) return;
       setTitle(data.title);
       setStartedAt(new Date(data.startedAt));
+      setSpeakerLabels(parseSpeakerLabels(data.speakerLabels));
       setTranscripts(
         data.transcripts.map((t) => ({
           id: t.id,
-          speaker: (t.speakerType === "partner" ? "partner" : "self") as Speaker,
+          speaker: t.speakerType,
           text: t.text,
           at: new Date(t.createdAt),
         })),
@@ -143,20 +184,20 @@ export default function RecordingPage({
   }, []);
 
   const saveTranscript = useCallback(
-    async (speaker: Speaker, text: string) => {
+    async (speakerKey: string, text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
       try {
         const res = await fetch("/api/transcripts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ meetingId, speakerType: speaker, text: trimmed }),
+          body: JSON.stringify({ meetingId, speakerType: speakerKey, text: trimmed }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const created = (await res.json()) as { id: string; createdAt: string };
         setTranscripts((prev) => [
           ...prev,
-          { id: created.id, speaker, text: trimmed, at: new Date(created.createdAt) },
+          { id: created.id, speaker: speakerKey, text: trimmed, at: new Date(created.createdAt) },
         ]);
       } catch (e) {
         showToast(`発言の保存に失敗: ${(e as Error).message}`);
@@ -167,24 +208,65 @@ export default function RecordingPage({
 
   const handlers = useMemo(
     () => ({
-      onPartial: (speaker: Speaker, text: string) => {
-        if (speaker === "self") setSelfState((s) => ({ ...s, partial: text }));
+      onPartial: (source: Source, text: string) => {
+        if (source === "self") setSelfState((s) => ({ ...s, partial: text }));
         else setPartnerState((s) => ({ ...s, partial: text }));
       },
-      onFinal: (speaker: Speaker, text: string) => {
-        if (speaker === "self") setSelfState((s) => ({ ...s, partial: "" }));
+      onFinal: (source: Source, speakerKey: string, text: string) => {
+        if (source === "self") setSelfState((s) => ({ ...s, partial: "" }));
         else setPartnerState((s) => ({ ...s, partial: "" }));
-        void saveTranscript(speaker, text);
+        void saveTranscript(speakerKey, text);
       },
-      onStatus: (speaker: Speaker, status: RecognizerStatus) => {
-        if (speaker === "self") setSelfState((s) => ({ ...s, status }));
+      onStatus: (source: Source, status: RecognizerStatus) => {
+        if (source === "self") setSelfState((s) => ({ ...s, status }));
         else setPartnerState((s) => ({ ...s, status }));
       },
-      onError: (_speaker: Speaker, message: string) => {
+      onError: (_source: Source, message: string) => {
         showToast(message);
       },
     }),
     [saveTranscript, showToast],
+  );
+
+  // 発言の話者を付け替える（誤分離の手動修正）。
+  const reassignSpeaker = useCallback(
+    async (transcriptId: string, nextKey: string) => {
+      const prevList = transcripts;
+      setTranscripts((prev) =>
+        prev.map((t) => (t.id === transcriptId ? { ...t, speaker: nextKey } : t)),
+      );
+      try {
+        const res = await fetch(`/api/transcripts/${transcriptId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ speakerType: nextKey }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch (e) {
+        setTranscripts(prevList); // ロールバック
+        showToast(`話者の変更に失敗: ${(e as Error).message}`);
+      }
+    },
+    [transcripts, showToast],
+  );
+
+  // 話者名のリネーム（全発言に反映）。
+  const renameSpeaker = useCallback(
+    async (key: string, name: string) => {
+      const next = { ...speakerLabels, [key]: name };
+      setSpeakerLabels(next);
+      try {
+        const res = await fetch(`/api/meetings/${meetingId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ speakerLabels: next }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch (e) {
+        showToast(`話者名の保存に失敗: ${(e as Error).message}`);
+      }
+    },
+    [speakerLabels, meetingId, showToast],
   );
 
   const startSelf = useCallback(async () => {
@@ -208,20 +290,44 @@ export default function RecordingPage({
   const startPartner = useCallback(async () => {
     if (partnerHandleRef.current) return;
     try {
-      const handle = await startLoopback(handlers);
+      // 既存ストリームがあれば再利用（感度再適用時に画面共有を再要求しない）。
+      let stream = partnerStreamRef.current;
+      if (!stream || !stream.active) {
+        stream = await acquirePartnerStream();
+        partnerStreamRef.current = stream;
+      }
+      const handle = await startRecognizer("partner", stream, handlers, {
+        diarize: true,
+        diarizerAlpha: `1e${diarizerExp}`,
+        keepStreamOnStop: true,
+      });
       partnerHandleRef.current = handle;
+      setRunningExp(diarizerExp);
     } catch (e) {
       showToast(`相手音声を開始できません: ${(e as Error).message}`);
       setPartnerState((s) => ({ ...s, status: "error" }));
     }
-  }, [handlers, showToast]);
+  }, [handlers, showToast, diarizerExp]);
 
   const stopPartner = useCallback(async () => {
     const h = partnerHandleRef.current;
     partnerHandleRef.current = null;
     if (h) await h.stop().catch(() => {});
+    // 完全停止: 画面共有ストリームも解放する。
+    try { partnerStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+    partnerStreamRef.current = null;
+    setRunningExp(null);
     setPartnerState({ status: "idle", partial: "" });
   }, []);
+
+  // 感度を録音中に反映: ストリームは保持したまま認識だけ貼り直す。
+  const reapplyPartner = useCallback(async () => {
+    const h = partnerHandleRef.current;
+    if (!h) return;
+    partnerHandleRef.current = null;
+    await h.stop().catch(() => {}); // keepStreamOnStop によりストリームは生存
+    await startPartner();
+  }, [startPartner]);
 
   const fetchFeedback = useCallback(async () => {
     if (busy !== "none") return;
@@ -302,6 +408,7 @@ export default function RecordingPage({
     return () => {
       void selfHandleRef.current?.stop();
       void partnerHandleRef.current?.stop();
+      try { partnerStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
     };
   }, []);
 
@@ -311,6 +418,12 @@ export default function RecordingPage({
 
   const latestFeedback = feedbacks[feedbacks.length - 1];
   const olderFeedbacks = feedbacks.slice(0, -1);
+
+  // 発言ログに現れた話者キー（手動修正セレクトと話者名編集パネルの選択肢）。
+  const speakerKeys = useMemo(
+    () => collectSpeakerKeys([SELF_KEY, ...transcripts.map((t) => t.speaker)], speakerLabels),
+    [transcripts, speakerLabels],
+  );
 
   const selfActive =
     selfState.status === "connecting" ||
@@ -349,6 +462,7 @@ export default function RecordingPage({
       {partnerState.status === "open" || partnerState.status === "connecting" ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           ⚠ 相手音声がスピーカから流れていると重複認識されます。ヘッドホンを使用してください。
+          相手側は自動で話者を分離します（相手1・相手2…）。誤りは各発言の話者を選び直して修正できます。
         </div>
       ) : null}
 
@@ -366,40 +480,76 @@ export default function RecordingPage({
         </div>
       ) : null}
 
+      <div className="rounded-md border border-zinc-200 bg-white px-3 py-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-zinc-600">
+          <span className="font-medium text-zinc-700">話者分離の感度</span>
+          <span className="text-zinc-400">少なめ</span>
+          <input
+            type="range"
+            min={DIARIZER_EXP_MIN}
+            max={DIARIZER_EXP_MAX}
+            step={1}
+            value={diarizerExp}
+            onChange={(e) => setDiarizerExp(Number(e.target.value))}
+            className="h-1.5 w-48 cursor-pointer accent-sky-600"
+            aria-label="話者分離の感度"
+          />
+          <span className="text-zinc-400">多め</span>
+          <span className="font-mono tabular-nums text-zinc-500">α=1e{diarizerExp}</span>
+          {partnerActive && runningExp !== null && runningExp !== diarizerExp ? (
+            <button
+              type="button"
+              onClick={() => void reapplyPartner()}
+              className="rounded bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-700"
+            >
+              録音中に再適用
+            </button>
+          ) : null}
+        </div>
+        <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+          話者が分かれすぎる（同じ人が別人扱い）→「少なめ」へ。
+          逆に人数が足りない（別人が同じ扱い）→「多め」へ。録音中に変えたら「再適用」を押すと反映されます。
+        </p>
+      </div>
+
       <div className="grid gap-4 md:grid-cols-[3fr_2fr]">
         <section className="rounded-lg border border-zinc-200 bg-white">
-          <div className="border-b border-zinc-100 px-4 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-4 py-2">
             <h2 className="text-sm font-semibold text-zinc-700">発言ログ</h2>
+            <SpeakerManager
+              speakerKeys={speakerKeys}
+              labels={speakerLabels}
+              onRename={renameSpeaker}
+            />
           </div>
           <div ref={transcriptScrollRef} className="h-[60vh] overflow-y-auto px-4 py-3 space-y-2">
             {transcripts.map((t) => (
               <div key={t.id} className="rounded border border-zinc-100 bg-zinc-50 px-3 py-2 text-sm">
-                <div className="flex items-baseline gap-2">
+                <div className="flex items-center gap-2">
                   <span className="text-xs text-zinc-500 tabular-nums">
                     {t.at.toLocaleTimeString("ja-JP")}
                   </span>
-                  <span
-                    className={
-                      t.speaker === "self"
-                        ? "rounded bg-sky-100 px-1.5 text-xs text-sky-700"
-                        : "rounded bg-emerald-100 px-1.5 text-xs text-emerald-700"
-                    }
-                  >
-                    {t.speaker === "self" ? "自分" : "相手"}
-                  </span>
+                  <SpeakerBadge speakerKey={t.speaker} labels={speakerLabels} />
+                  <span className="grow" />
+                  <SpeakerReassignSelect
+                    value={t.speaker}
+                    speakerKeys={speakerKeys}
+                    labels={speakerLabels}
+                    onChange={(nextKey) => void reassignSpeaker(t.id, nextKey)}
+                  />
                 </div>
                 <p className="mt-1 whitespace-pre-wrap">{t.text}</p>
               </div>
             ))}
             {selfState.partial ? (
               <div className="rounded border border-dashed border-sky-200 bg-sky-50/50 px-3 py-2 text-sm text-zinc-500">
-                <span className="rounded bg-sky-100 px-1.5 text-xs text-sky-700">自分</span>
+                <SpeakerBadge speakerKey={SELF_KEY} labels={speakerLabels} />
                 <span className="ml-2 italic">{selfState.partial}</span>
               </div>
             ) : null}
             {partnerState.partial ? (
               <div className="rounded border border-dashed border-emerald-200 bg-emerald-50/50 px-3 py-2 text-sm text-zinc-500">
-                <span className="rounded bg-emerald-100 px-1.5 text-xs text-emerald-700">相手</span>
+                <span className="rounded bg-emerald-100 px-1.5 text-xs text-emerald-700">相手（認識中）</span>
                 <span className="ml-2 italic">{partnerState.partial}</span>
               </div>
             ) : null}

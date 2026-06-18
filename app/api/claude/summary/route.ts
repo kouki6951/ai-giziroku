@@ -2,6 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requestSummary } from "@/lib/claude";
 import { parseRoleIds } from "@/lib/roles";
+import { parseSpeakerLabels } from "@/lib/speakers";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -15,7 +16,7 @@ export async function POST(req: NextRequest) {
 
   const meeting = await prisma.meeting.findUnique({
     where: { id: meetingId },
-    select: { id: true, roles: true, description: true },
+    select: { id: true, roles: true, description: true, speakerLabels: true },
   });
   if (!meeting) {
     return NextResponse.json({ error: "meeting not found" }, { status: 404 });
@@ -38,6 +39,7 @@ export async function POST(req: NextRequest) {
 
   const roleIds = parseRoleIds(meeting.roles);
   const description = meeting.description;
+  const speakerLabels = parseSpeakerLabels(meeting.speakerLabels);
   const transcriptInput = transcripts.map((t) => ({
     speakerType: t.speakerType,
     text: t.text,
@@ -53,6 +55,7 @@ export async function POST(req: NextRequest) {
       const summaryText = await requestSummary(transcriptInput, feedbackInput, {
         roleIds,
         description,
+        speakerLabels,
       });
       await prisma.meetingSummary.create({ data: { meetingId, summaryText } });
       await prisma.meeting.update({

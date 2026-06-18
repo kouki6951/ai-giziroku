@@ -15,6 +15,7 @@ model Meeting {
   title       String
   description   String?   @map("description") // 会議の目的・内容などのメタ情報
   roles         String?   @map("roles") // フィードバックを求めるロール (JSON配列の文字列)
+  speakerLabels String?   @map("speaker_labels") // 話者キー→表示名の対応 (JSONオブジェクトの文字列)
   summaryStatus String?   @map("summary_status") // 議事録生成の状態: processing | done | error
   startedAt   DateTime  @default(now()) @map("started_at")
   endedAt     DateTime? @map("ended_at")
@@ -32,7 +33,7 @@ model Meeting {
 model Transcript {
   id          String   @id @default(cuid())
   meetingId   String   @map("meeting_id")
-  speakerType String   @map("speaker_type") // 'self' | 'partner'
+  speakerType String   @map("speaker_type") // 'self' | 'partner-0' | 'partner-1' | ...
   text        String
   createdAt   DateTime @default(now()) @map("created_at")
 

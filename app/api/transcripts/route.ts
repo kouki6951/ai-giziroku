@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { isValidSpeakerKey } from "@/lib/speakers";
 
 export const runtime = "nodejs";
-
-const ALLOWED_SPEAKER = new Set(["self", "partner"]);
 
 export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => null)) as
@@ -13,7 +12,7 @@ export async function POST(req: NextRequest) {
   const speakerType = typeof body?.speakerType === "string" ? body.speakerType : "";
   const text = typeof body?.text === "string" ? body.text.trim() : "";
 
-  if (!meetingId || !ALLOWED_SPEAKER.has(speakerType) || !text) {
+  if (!meetingId || !isValidSpeakerKey(speakerType) || !text) {
     return NextResponse.json({ error: "invalid payload" }, { status: 400 });
   }
 

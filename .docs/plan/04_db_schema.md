@@ -6,8 +6,8 @@
 
 | テーブル             | 用途                                |
 | -------------------- | ----------------------------------- |
-| `meetings`           | 会議そのもの。タイトルと期間を保持   |
-| `transcripts`        | 発言ログ（speaker_type 付き）        |
+| `meetings`           | 会議そのもの。タイトルと期間、話者名マップを保持 |
+| `transcripts`        | 発言ログ（speaker_type 付き。複数話者対応） |
 | `claude_feedbacks`   | 議事中の Claude ヒアリング提案       |
 | `meeting_summaries`  | 会議終了時の Claude 議事録            |
 
@@ -24,6 +24,7 @@ erDiagram
         string title
         string description
         string roles
+        string speaker_labels
         string summary_status
         datetime started_at
         datetime ended_at
@@ -61,6 +62,7 @@ erDiagram
 | `title`      | `string(200)`  | NOT   |                     | 会議タイトル                        |
 | `description` | `text`        | NULL  |                     | 会議の目的・内容（メタ情報）。フィードバック／議事録生成時にコンテキストとして渡す |
 | `roles`      | `text`         | NULL  |                     | フィードバック対象ロールの JSON 配列文字列（例: `["sales","engineer"]`）。空・未選択時はロール非依存 |
+| `speaker_labels` | `text`     | NULL  |                     | 話者キー→表示名の JSON オブジェクト文字列（例: `{"partner-0":"田中","self":"自分"}`）。未設定の話者は既定名（`自分` / `相手1`…）で表示 |
 | `summary_status` | `string(16)` | NULL |                     | 議事録生成の状態（`processing` / `done` / `error`）。バックグラウンド生成の進捗管理に使用 |
 | `started_at` | `datetime`     | NOT   | `now()`             | 会議開始時刻（録音開始時に確定）    |
 | `ended_at`   | `datetime`     | NULL  |                     | 会議終了時刻。終了 API で確定         |
@@ -75,12 +77,12 @@ erDiagram
 | -------------- | -------------- | ---- | --------- | ----------------------------------------------- |
 | `id`           | `string` (CUID) | NOT  |           | 主キー                                          |
 | `meeting_id`   | `string`       | NOT  |           | `meetings.id` への外部キー（ON DELETE CASCADE） |
-| `speaker_type` | `string(16)`   | NOT  |           | `self` / `partner`                              |
+| `speaker_type` | `string(16)`   | NOT  |           | 話者キー。`self`（自分のマイク）/ `partner-0` / `partner-1` …（相手側を話者ダイアライゼーションで分離した各話者） |
 | `text`         | `text`         | NOT  |           | 発言テキスト（確定文のみ保存）                  |
 | `created_at`   | `datetime`     | NOT  | `now()`   | 発話時刻                                         |
 
 - インデックス: `(meeting_id, created_at)`（タイムライン取得）
-- 値制約: `speaker_type IN ('self', 'partner')`（アプリ層で検証）
+- 値制約: `self` または `partner-<数字>`（アプリ層で正規表現検証）。発言ごとに話者を後から付け替え可能（PATCH）
 
 ### 3.3 `claude_feedbacks`
 
@@ -122,6 +124,7 @@ model Meeting {
   title         String
   description   String?   @map("description")        // 会議の目的・内容（メタ情報）
   roles         String?   @map("roles")              // フィードバック対象ロールの JSON 配列文字列
+  speakerLabels String?   @map("speaker_labels")     // 話者キー→表示名の JSON オブジェクト文字列
   summaryStatus String?   @map("summary_status")     // 議事録生成の状態: processing | done | error
   startedAt     DateTime  @default(now()) @map("started_at")
   endedAt       DateTime? @map("ended_at")
@@ -139,7 +142,7 @@ model Meeting {
 model Transcript {
   id          String   @id @default(cuid())
   meetingId   String   @map("meeting_id")
-  speakerType String   @map("speaker_type") // 'self' | 'partner'
+  speakerType String   @map("speaker_type") // 'self' | 'partner-0' | 'partner-1' | ...
   text        String
   createdAt   DateTime @default(now()) @map("created_at")
 
@@ -179,7 +182,9 @@ model MeetingSummary {
 | 操作                         | 影響テーブル                                                    |
 | ---------------------------- | --------------------------------------------------------------- |
 | 「ミーティング開始」         | `meetings` に 1 行 INSERT（`started_at = now()`）               |
-| 確定発話受信                 | `transcripts` に 1 行 INSERT                                    |
+| 確定発話受信                 | `transcripts` に 1 行 INSERT（相手側は話者ダイアライゼーションで `partner-N` を付与） |
+| 発言の話者を手動修正         | 対象 `transcripts.speaker_type` を UPDATE（PATCH `/api/transcripts/[id]`） |
+| 話者名のリネーム             | `meetings.speaker_labels` を UPDATE（PATCH `/api/meetings/[id]`）。全発言の表示に反映 |
 | 「フィードバック取得」       | `claude_feedbacks` に 1 行 INSERT                               |
 | 「議事録を生成して終了」     | `meetings.ended_at` を UPDATE → `summary_status='processing'` に更新 → バックグラウンドで生成し、完了で `meeting_summaries` に 1 行 INSERT ＋ `summary_status='done'`（失敗時は `'error'`） |
 | 会議削除（管理操作）         | `meetings` を DELETE → 関連 3 テーブルが CASCADE DELETE         |
@@ -192,7 +197,7 @@ model MeetingSummary {
 
 ## 7. マイグレーション運用
 
-- 初期マイグレーション（init）は `prisma migrate dev` で作成する。以降の列追加（`description` / `roles` / `summary_status` など）はマイグレーションファイルを作らず `npx prisma db push` でスキーマを反映する運用とする
+- 初期マイグレーション（init）は `prisma migrate dev` で作成する。以降の列追加（`description` / `roles` / `speaker_labels` / `summary_status` など）はマイグレーションファイルを作らず `npx prisma db push` でスキーマを反映する運用とする
 - 本番反映は `prisma migrate deploy`
 - SQLite → PostgreSQL の切替時は `datasource.provider` を変更し、再度初期マイグレーションを作り直す
 

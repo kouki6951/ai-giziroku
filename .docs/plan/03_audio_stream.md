@@ -2,8 +2,10 @@
 
 AmiVoice Cloud Platform の WebSocket 音声認識 API を、ブラウザから 2 系統並列で呼び出す方式で取得する。
 
-- **自分の声**: `getUserMedia` で取得したマイク入力 → AmiVoice セッション A（`speaker_type = self`）
-- **相手の声**: `getDisplayMedia` で取得したシステム音声（タブ／画面のループバック） → AmiVoice セッション B（`speaker_type = partner`）
+- **自分の声**: `getUserMedia` で取得したマイク入力 → AmiVoice セッション A（`speaker_type = self`、単一話者）
+- **相手の声**: `getDisplayMedia` で取得したシステム音声（タブ／画面のループバック） → AmiVoice セッション B。複数人が 1 本の音声に混ざるため **話者ダイアライゼーション** を有効化し、`partner-0` / `partner-1` … と複数話者に分離する
+
+> **複数人対応**: 相手側ループバックは会議参加者全員の声がミックスされた 1 ストリームになる。これを音源だけで分けることはできないため、セッション B では AmiVoice の話者ダイアライゼーション（`segmenterProperties=useDiarizer=1`）を使い、認識結果トークンの `label`（`speaker0` / `speaker1` …）を話者キー `partner-0` / `partner-1` … に変換して保存する。自動分離の誤りは UI 上で手動修正できる（後述）。
 
 サーバを経由しない理由は、リアルタイム性（往復遅延の削減）と Next.js Route Handler の WebSocket 非対応のため。AmiVoice の APP_KEY はクローズド運用のためブラウザに直接配布する（社内 LAN／VPN 前提）。
 
@@ -120,10 +122,19 @@ AmiVoice のリアルタイム音声認識 API は、テキストフレームで
 
 #### コマンド（テキストフレーム）
 - 開始: `s <音声フォーマット> <エンジン> <パラメータ列>`
-  - 例: `s 16K LSB16 -a-general authorization=<APP_KEY> resultUpdatedInterval=400`
-  - `16K LSB16` = 16kHz / 16bit / リトルエンディアン PCM
+  - 例: `s LSB16K -a-general authorization=<APP_KEY> resultUpdatedInterval=400`
+  - `LSB16K` = 16kHz / 16bit / リトルエンディアン PCM（単一トークン）
+  - **相手側（partner）のみ**: `segmenterProperties="useDiarizer=1 diarizerAlpha=<値>"` を付与して話者ダイアライゼーションを有効化
 - 音声送信: バイナリフレーム先頭 1 バイトに `p`（=0x70）を付け、後続に PCM データ
 - 終了: テキストフレーム `e`
+
+#### 話者ダイアライゼーション（partner のみ）
+- `useDiarizer=1` で有効化。確定発話（`A`）の `results[].tokens[].label` に `speaker0` / `speaker1` … が付く
+- `diarizerAlpha` が分離の感度。大きいほど新しい話者が出やすい（AmiVoice 既定は `1e-10`）。**最大 20 話者**まで分離可能
+  - 実際より話者数が少ない（別人が同じ扱い）→ 大きく（`1e10`, `1e20` …）
+  - 1 人が複数に割れる → 小さく（`1e-40`, `1e-50` …）
+- 既定値は環境変数 `NEXT_PUBLIC_AMIVOICE_DIARIZER_ALPHA`（無指定時はコード既定 `1e0`）。録音画面のスライダーで会議ごとに上書きでき、設定は `localStorage` に永続化される
+- 録音中に感度を変えた場合は、保持済みのループバック MediaStream を再利用して認識セッションのみ貼り直す（画面共有ダイアログを再表示しない）。クライアントでは `acquirePartnerStream()` で取得とリコグナイザ開始を分離し、`keepStreamOnStop` で stop 時にストリームを止めないことで実現している
 
 #### 受信イベント
 - `s` レスポンス: 開始 ACK
@@ -134,11 +145,16 @@ AmiVoice のリアルタイム音声認識 API は、テキストフレームで
 
 確定発話のみを DB 保存対象とする。中間結果は画面の最終行に上書き表示する。
 
-### 2.5 self / partner の付与
-- 認識結果ごとに、どちらの WebSocket セッションから来たかで `speaker_type` を一意に決定
-  - セッション A の結果 → `self`
-  - セッション B の結果 → `partner`
-- UI で手動切替は **しない**（ループバック方式により自動分離されるため）
+### 2.5 話者キーの付与と手動修正
+- 認識結果ごとに `speaker_type`（話者キー）を決定する
+  - セッション A（マイク）の確定結果 → `self`
+  - セッション B（ループバック）の確定結果 → ダイアライゼーション `label` を変換した `partner-0` / `partner-1` …
+  - 1 発話セグメント内に複数 `label` が混ざる場合は **最頻 label** を採用
+- 中間結果（`U`）はダイアライゼーション前のため話者未確定として「相手（認識中）」表示にとどめ、確定（`A`）時に正しい話者キーへ割り当てる
+- **手動修正**（自動分離の誤りを補正）
+  - 発言ごとの話者付け替え: 各発言のセレクトで別話者を選ぶ（`＋ 新しい話者` で新規 `partner-N` も発行可能）→ PATCH `/api/transcripts/[id]`
+  - 話者名のリネーム: 話者名入力欄で表示名を変更（全発言に反映）→ PATCH `/api/meetings/[id]`（`speaker_labels`）
+  - 表示名・配色は `lib/speakers.ts` に集約（既定名は `自分` / `相手1` / `相手2` …）。録音画面・詳細画面の双方で編集可能
 
 ## 3. 採用しなかった代替案と理由
 

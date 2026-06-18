@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requestFeedback } from "@/lib/claude";
 import { parseRoleIds } from "@/lib/roles";
+import { parseSpeakerLabels } from "@/lib/speakers";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -19,7 +20,7 @@ export async function POST(req: NextRequest) {
 
   const meeting = await prisma.meeting.findUnique({
     where: { id: meetingId },
-    select: { id: true, roles: true, description: true },
+    select: { id: true, roles: true, description: true, speakerLabels: true },
   });
   if (!meeting) {
     return NextResponse.json({ error: "meeting not found" }, { status: 404 });
@@ -41,7 +42,11 @@ export async function POST(req: NextRequest) {
   try {
     feedbackText = await requestFeedback(
       inOrder.map((t) => ({ speakerType: t.speakerType, text: t.text, createdAt: t.createdAt })),
-      { roleIds: parseRoleIds(meeting.roles), description: meeting.description },
+      {
+        roleIds: parseRoleIds(meeting.roles),
+        description: meeting.description,
+        speakerLabels: parseSpeakerLabels(meeting.speakerLabels),
+      },
     );
   } catch (e) {
     return NextResponse.json(
